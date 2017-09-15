@@ -1,0 +1,96 @@
+==== edns rfc7871
+https://tools.ietf.org/html/rfc6891
+http://www.afasterinternet.com/howitworks.htm (explanation of edns0 subnet client)
+
+
+==== stats
+ripe atlas measurements naar team 2 webserver: ddos-web2.slvnt.io  / 195.109.202.150
+https://atlas.ripe.net/measurements/9308861/   (ICMP)
+/measurements/9309004/  (TCP/80 traceroute)
+https://atlas.ripe.net/measurements/9313329/ (edns0 test)
+https://atlas.ripe.net/measurements/9313372/ (edns0 via our own recursor)
+
+
+==== web2 DNS AUTH (195.109.202.150)
+==== installation nsd 4.1.7
+apt install nsd
+
+==== configuration
+# /etc/nsd/nsd.conf
+server:
+        server-count: 1
+        ip-address: 0.0.0.0
+        do-ip6: no
+        nsid: "ascii_hackaton"
+
+
+remote-control:
+zone:
+         name: "hackaton.eu"
+         zonefile: "nsd.conf.d/hackaton.eu.zone"
+
+=== pcap capture && data analysis ===
+web6 dns recursor gives: debug: subnet: Authority indicates no support
+so nsd does not the query client given by our recursor, therefor this ugly hack below:
+
+pcap capture on team2 :  tcpdump -nls 0 -w ./dns-capture.pcap -i ens224 port 53
+data analysis one-liner: tshark -nlr ./dns-capture.pcap -V | perl -ne'/^\s+Source\: ([\d\.]{4,})/ && print "\ns:$1 " ; /Source Netmask: (\d+)/ && print "m:$1 " ; /Client Subnet\: (\S+)/ && print "c:$1"' > data.txt
+
+( tshark -nlr ./dns-capture.pcap -V | perl -ne'/^\s+Source\: ([\d\.]{4,})/ && print "}\n{\"s\":\"$1\", " ; /Source Netmask: (\d+)/ && rint "\"m\":\"$1\", " ; /Client Subnet\: (\S+)/ && print "\"c\": \"$1\" "' | grep -v 's:195.10.202.150'  | perl -ple's/\, \}/}/' && echo -n "}" ) > data3.txt
+
+
+==== web6 DNS RECURSOR (195.10.202.214)
+
+==== installation unbound 1.6.5
+apt-get install libexpat1-dev
+apt-get install libssl-dev
+apt install build-essential
+apt-get install libsystemd-dev
+wget https://www.unbound.net/downloads/unbound-1.6.5.tar.gz
+./configure --enable-subnet
+make
+make install
+config /usr/local/etc/unbound
+useradd -c "unbound daemon" -r -s /usr/sbin/nologin unbound
+unbound-anchor -a /var/lib/unbound/root.key
+ln -s /usr/local/sbin/unbound /usr/sbin/unbound
+
+
+==== configuration
+# /usr/local/etc/unbound/unbound.conf
+include: "/usr/local/etc/unbound/unbound.conf.d/*.conf"
+
+# /usr/local/etc/unbound/unbound.conf.d/unbound-local.conf
+server:
+   access-control: 0.0.0.0/0 allow
+   cache-max-ttl: 14400
+   cache-min-ttl: 900
+   hide-identity: yes
+   hide-version: yes
+   interface: 0.0.0.0
+   do-ip4: yes
+   do-ip6: no
+   minimal-responses: yes
+   prefetch: yes
+   qname-minimisation: yes
+   rrset-roundrobin: yes
+   use-caps-for-id: yes
+
+   # log
+   verbosity: 3
+   logfile: /var/log/unbound.log
+
+   # edns
+   client-subnet-always-forward: yes
+   send-client-subnet: 195.10.202.150
+   client-subnet-zone: hackaton.eu
+
+   # disable dnssec (key permission error)
+   domain-insecure: hackaton.eu
+
+# /usr/local/etc/unbound/unbound.conf.d/root-auto-trust-anchor-file.conf
+server:
+   auto-trust-anchor-file: "root.key"
+
+# start unbound as root (drops privs to unbound)
+unbound -d
